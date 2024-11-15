@@ -1,0 +1,170 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.0;
+
+interface LinkTokenInterface {
+    function transferAndCall(address to, uint256 value, bytes calldata data) external returns (bool success);
+}
+
+abstract contract VRFConsumerBase {
+    function fulfillRandomness(bytes32 requestId, uint256 randomness) internal virtual;
+}
+
+contract JediBet is VRFConsumerBase {
+    // Bet parameters
+    uint256 public betAmount;
+    uint256 public winningNumber;
+    bool public betOpen;
+    address public owner;
+    bool private locked;
+
+    // Chainlink VRF variables
+    bytes32 internal keyHash;
+    uint256 internal fee;
+    LinkTokenInterface internal LINK;
+
+    // Player data
+    struct Bet {
+        uint256 guessedNumber;
+        bytes32 commitHash;
+        bool revealed;
+    }
+    mapping(address => Bet) public bets;
+    address[] public players;
+    address[] public winners;
+
+    event BetPlaced(address indexed player, uint256 guessedNumber);
+    event WinnerChosen(address[] winners, uint256 winningAmount);
+
+    modifier onlyOwner() {
+        require(msg.sender == owner, "Not contract owner");
+        _;
+    }
+
+    modifier nonReentrant() {
+        require(!locked, "Reentrant call detected");
+        locked = true;
+        _;
+        locked = false;
+    }
+
+    constructor(
+        uint256 _betAmount,
+        address _vrfCoordinator,
+        address _linkToken,
+        bytes32 _keyHash,
+        uint256 _fee
+    )
+    {
+        owner = msg.sender;
+        betAmount = _betAmount;
+        keyHash = _keyHash;
+        fee = _fee;
+        LINK = LinkTokenInterface(_linkToken);
+        betOpen = true;
+    }
+
+    // Players place their bet by sending a hashed number and the fixed bet amount
+    function placeBet(bytes32 _commitHash) public payable nonReentrant {
+        require(betOpen, "Betting is closed");
+        require(msg.value == betAmount, "Must send exact bet amount");
+        require(bets[msg.sender].commitHash == bytes32(0), "Bet already placed");
+
+        bets[msg.sender] = Bet(0, _commitHash, false);
+        players.push(msg.sender);
+        emit BetPlaced(msg.sender, 0); // We only emit that a bet is placed, not the guessed number
+    }
+
+    // Reveal bet by sending the guessed number. This is the second part of the commit-reveal scheme.
+    function revealBet(uint256 guessedNumber, bytes32 secret) public nonReentrant {
+        require(betOpen, "Betting is closed");
+        require(bets[msg.sender].commitHash != bytes32(0), "No bet placed");
+        require(!bets[msg.sender].revealed, "Bet already revealed");
+        require(keccak256(abi.encodePacked(guessedNumber, secret)) == bets[msg.sender].commitHash, "Invalid reveal");
+
+        bets[msg.sender].guessedNumber = guessedNumber;
+        bets[msg.sender].revealed = true;
+    }
+
+    // Only owner (the game manager) can close betting and request random number
+    function closeBettingAndRequestRandomNumber() public onlyOwner nonReentrant {
+        require(betOpen, "Betting already closed");
+        require(players.length > 0, "No players in this round");
+        require(LINK.transferAndCall(address(this), fee, abi.encode(keyHash, address(this))), "Not enough LINK");
+
+        betOpen = false;
+        // Example: The requestRandomness function from Chainlink can be modified to accept keyHash and fee.
+        requestRandomness(keyHash, fee);
+    }
+
+    // Fulfills the randomness request from Chainlink VRF
+    function fulfillRandomness(bytes32 requestId, uint256 randomness) internal override {
+        winningNumber = randomness % 100; // Example range 0-99
+        selectWinners();
+    }
+
+    // Determines the winners based on their guesses
+    function selectWinners() private nonReentrant {
+        uint256 closest = type(uint256).max;
+
+        // Find the closest guess without going over
+        for (uint256 i = 0; i < players.length; i++) {
+            address player = players[i];
+            if (bets[player].revealed && bets[player].guessedNumber <= winningNumber) {
+                uint256 diff = winningNumber - bets[player].guessedNumber;
+                if (diff < closest) {
+                    closest = diff;
+                    delete winners;
+                    winners.push(player);
+                } else if (diff == closest) {
+                    winners.push(player);
+                }
+            }
+        }
+
+        // Handle case where all guesses are over the winning number or no valid guesses
+        if (winners.length == 0) {
+            for (uint256 i = 0; i < players.length; i++) {
+                address player = players[i];
+                if (bets[player].revealed) {
+                    winners.push(player);
+                }
+            }
+        }
+
+        uint256 prize = address(this).balance / winners.length;
+        for (uint256 i = 0; i < winners.length; i++) {
+            payable(winners[i]).transfer(prize);
+        }
+
+        emit WinnerChosen(winners, prize);
+        resetGame();
+    }
+
+    // Reset game state for the next round
+    function resetGame() private {
+        for (uint256 i = 0; i < players.length; i++) {
+            address player = players[i];
+            delete bets[player];
+        }
+        delete players;
+        delete winners;
+        winningNumber = 0;
+        betOpen = true;
+    }
+
+    // Refunds all players if there's an error
+    function refundAll() public onlyOwner nonReentrant {
+        for (uint256 i = 0; i < players.length; i++) {
+            address player = players[i];
+            if (bets[player].commitHash != bytes32(0)) {
+                payable(player).transfer(betAmount);
+            }
+        }
+        resetGame();
+    }
+
+    // Helper function to get the contract balance
+    function getBalance() public view returns (uint256) {
+        return address(this).balance;
+    }
+}
