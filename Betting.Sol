@@ -1,15 +1,10 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.0;
 
-interface LinkTokenInterface {
-    function transferAndCall(address to, uint256 value, bytes calldata data) external returns (bool success);
-}
+import "@chainlink/contracts/src/v0.8/interfaces/ChainlinkRequestInterface.sol";
+import "@chainlink/contracts/src/v0.8/vrf/VRFConsumerBase.sol";
 
-abstract contract VRFConsumerBase {
-    function fulfillRandomness(bytes32 requestId, uint256 randomness) internal virtual;
-}
-
-contract JediBet is VRFConsumerBase {
+contract JediBet is VRFConsumerBase{
     // Bet parameters
     uint256 public betAmount;
     uint256 public winningNumber;
@@ -20,7 +15,7 @@ contract JediBet is VRFConsumerBase {
     // Chainlink VRF variables
     bytes32 internal keyHash;
     uint256 internal fee;
-    LinkTokenInterface internal LINK;
+    //LinkTokenInterface internal LINK;
 
     // Player data
     struct Bet {
@@ -53,13 +48,13 @@ contract JediBet is VRFConsumerBase {
         address _linkToken,
         bytes32 _keyHash,
         uint256 _fee
-    )
+    ) VRFConsumerBase(_vrfCoordinator, _linkToken)
     {
         owner = msg.sender;
         betAmount = _betAmount;
         keyHash = _keyHash;
         fee = _fee;
-        LINK = LinkTokenInterface(_linkToken);
+        LinkTokenInterface LINK = LinkTokenInterface(_linkToken);
         betOpen = true;
     }
 
@@ -168,3 +163,4 @@ contract JediBet is VRFConsumerBase {
         return address(this).balance;
     }
 }
+
